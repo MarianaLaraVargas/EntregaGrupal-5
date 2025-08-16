@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Gym Inventory</title>
+
+  <!-- Bootstrap 5 -->
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"/>
+
+  <style>
+    body { padding-top: 4.5rem; }
+    .table-fixed-header thead th { position: sticky; top: 0; background: #fff; z-index: 1; }
+  </style>
+
+  <script>
+    let editId = null; // para el modal de edición
+
+    // ---------- Helpers UI ----------
+    function showToast(msg, isError = false) {
+      const toastContainer = document.getElementById("toastContainer");
+      const toast = document.createElement("div");
+      toast.className = "toast align-items-center border-0" + (isError ? " text-bg-danger" : " text-bg-primary");
+      toast.setAttribute("role", "alert");
+      toast.setAttribute("aria-live", "assertive");
+      toast.setAttribute("aria-atomic", "true");
+      toast.innerHTML = `
+        <div class="d-flex">
+          <div class="toast-body">${msg}</div>
+          <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast" aria-label="Close"></button>
+        </div>`;
+      toastContainer.appendChild(toast);
+      const t = new bootstrap.Toast(toast, { delay: 3500 });
+      t.show();
+      toast.addEventListener("hidden.bs.toast", () => toast.remove());
+    }
+
+    // ---------- CLEANED ----------
+    async function fetchCleaned() {
+      const tbody = document.getElementById("tbodyCleaned");
+      const alertBox = document.getElementById("alert");
+      const spinner = document.getElementById("spinner");
+
+      alertBox.classList.add("d-none");
+      spinner.classList.remove("d-none");
+      tbody.innerHTML = "";
+
+      try {
+        const res = await fetch("/api/cleaned");
+        if (!res.ok) throw new Error("Error de red");
+        const data = await res.json();
+
+        if (!Array.isArray(data) || data.length === 0) {
+          tbody.innerHTML = `<tr><td colspan="3" class="text-center text-muted">Sin datos</td></tr>`;
+          return;
+        }
+
+        data.forEach(item => {
+          const tr = document.createElement("tr");
+          tr.innerHTML = `
+            <td>${item.id}</td>
+            <td>${item.name}</td>
+            <td><span class="badge ${item.quantity > 0 ? "text-bg-success" : "text-bg-secondary"}">${item.quantity}</span></td>`;
+          tbody.appendChild(tr);
+        });
+      } catch {
+        alertBox.textContent = "No se pudo cargar el inventario. Intenta de nuevo.";
+        alertBox.classList.remove("d-none");
+      } finally {
+        spinner.classList.add("d-none");
+      }
+    }
+
+    async function runPipeline() {
+      const runBtn = document.getElementById("runBtn");
+      runBtn.disabled = true; runBtn.innerText = "Ejecutando ETL…";
+      try {
+        const r = await fetch("/api/pipeline/run");
+        if (!r.ok) throw new Error();
+        await fetchCleaned();
+        showToast("ETL ejecutado. Refrescado inventory_cleaned.");
+      } catch {
+        showToast("No se pudo ejecutar el pipeline.", true);
+      } finally {
+        runBtn.disabled = false; runBtn.innerText = "Ejecutar ETL";
+      }
+    }
+
+    // ---------- RAW (editable) ----------
+    async function fetchRaw() {
+      const tbody = document.getElementById("tbodyRaw");
+      tbody.innerHTML = "";
+      try {
+        const res = await fetch("/api/raw");
+        if (!res.ok) throw new Error();
+        const data = await res.json();
+
+        if (!Array.isArray(data) || data.length === 0) {
+          tbody.innerHTML = `<tr><td colspan="4" class="text-center text-muted">Sin datos</td></tr>`;
+          return;
+        }
+
+        data.forEach(row => {
+          const tr = document.createElement("tr");
+          tr.innerHTML = `
+            <td>${row.id}</td>
+            <td>${row.name}</td>
+            <td>${row.quantity}</td>
+            <td>
+              <button class="btn btn-sm btn-outline-primary me-1"
+                onclick='openEdit(${row.id}, ${JSON.stringify(row.name)}, ${row.quantity})'>Editar</button>
+              <button class="btn btn-sm btn-outline-danger" onclick="deleteItem(${row.id})">Eliminar</button>
+            </td>`;
+          tbody.appendChild(tr);
+        });
+      } catch {
+        tbody.innerHTML = `<tr><td colspan="4" class="text-center text-danger">Error cargando RAW</td></tr>`;
+      }
+    }
+
+    async function addItemRaw() {
+      const nameEl = document.getElementById("nameInput");
+      const qtyEl  = document.getElementById("qtyInput");
+      const name = (nameEl.value || "").trim();
+      const quantity = parseInt(qtyEl.value, 10);
+      if (!name || Number.isNaN(quantity)) {
+        showToast("Completa nombre y cantidad válida.", true); return;
+      }
+      try {
+        const res = await fetch("/api/raw", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name, quantity })
+        });
+        if (!res.ok) throw new Error();
+        nameEl.value = ""; qtyEl.value = "";
+        await fetchRaw();
+        showToast("Ítem agregado a RAW. Ejecuta ETL y luego 'Refrescar' para verlo limpio.");
+      } catch {
+        showToast("No se pudo agregar el ítem (RAW).", true);
+      }
+    }
+
+    function openEdit(id, name, qty) {
+      editId = id;
+      document.getElementById("editName").value = name || "";
+      document.getElementById("editQty").value  = qty ?? "";
+      const modal = new bootstrap.Modal(document.getElementById("editModal"));
+      modal.show();
+    }
+
+    async function saveEdit() {
+      const name = document.getElementById("editName").value.trim();
+      const quantity = parseInt(document.getElementById("editQty").value, 10);
+      if (!editId) return;
+      if (!name && Number.isNaN(quantity)) {
+        showToast("No hay cambios.", true); return;
+      }
+      const payload = {};
+      if (name) payload.name = name;
+      if (!Number.isNaN(quantity)) payload.quantity = quantity;
+
+      try {
+        const res = await fetch(`/api/raw/${editId}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+        if (!res.ok) throw new Error();
+        await fetchRaw();
+        showToast("Ítem actualizado. Recuerda ejecutar ETL para reflejarse en cleaned.");
+      } catch {
+        showToast("No se pudo actualizar el ítem.", true);
+      } finally {
+        const modalEl = document.getElementById("editModal");
+        const modal = bootstrap.Modal.getInstance(modalEl);
+        modal?.hide();
+      }
+    }
+
+    async function deleteItem(id) {
+      if (!confirm(`¿Eliminar ítem RAW #${id}?`)) return;
+      try {
+        const res = await fetch(`/api/raw/${id}`, { method: "DELETE" });
+        if (!res.ok) throw new Error();
+        await fetchRaw();
+        showToast("Ítem eliminado de RAW.");
+      } catch {
+        showToast("No se pudo eliminar el ítem.", true);
+      }
+    }
+
+    window.onload = () => { fetchCleaned(); fetchRaw(); };
+  </script>
+</head>
+<body>
+  <!-- Navbar -->
+  <nav class="navbar navbar-expand-lg navbar-dark bg-dark fixed-top">
+    <div class="container">
+      <a class="navbar-brand fw-bold" href="#">Gym Inventory</a>
+      <div class="collapse navbar-collapse">
+        <ul class="navbar-nav ms-auto">
+          <li class="nav-item me-2">
+            <button id="runBtn" class="btn btn-outline-light" onclick="runPipeline()">Ejecutar ETL</button>
+          </li>
+          <li class="nav-item">
+            <button class="btn btn-warning" onclick="fetchCleaned()">Refrescar</button>
+          </li>
+        </ul>
+      </div>
+    </div>
+  </nav>
+
+  <!-- Toasts -->
+  <div class="position-fixed bottom-0 end-0 p-3" style="z-index: 1080">
+    <div id="toastContainer" class="toast-container"></div>
+  </div>
+
+  <main class="container">
+    <div id="alert" class="alert alert-danger d-none" role="alert"></div>
+
+    <!-- Form add to RAW -->
+    <div class="d-flex align-items-end gap-2 flex-wrap my-3">
+      <div>
+        <label for="nameInput" class="form-label mb-1">Nombre</label>
+        <input id="nameInput" class="form-control" type="text" placeholder="Mancuernas 5Kg" required />
+      </div>
+      <div>
+        <label for="qtyInput" class="form-label mb-1">Cantidad</label>
+        <input id="qtyInput" class="form-control" type="number" placeholder="10" required />
+      </div>
+      <button class="btn btn-primary" onclick="addItemRaw()">Agregar</button>
+    </div>
+
+    <!-- Cleaned table -->
+    <h2 class="h5">Inventario Limpio (solo lectura)</h2>
+    <div class="d-flex align-items-center mb-2">
+      <div id="spinner" class="spinner-border me-2 d-none" role="status" aria-hidden="true"></div>
+      <small class="text-muted">Flujo: Agrega → Ejecutar ETL → Refrescar</small>
+    </div>
+    <div class="table-responsive mb-4">
+      <table class="table table-striped table-hover table-fixed-header align-middle">
+        <thead class="table-light">
+          <tr>
+            <th style="width: 80px;">ID</th>
+            <th>Nombre</th>
+            <th style="width: 140px;">Cantidad</th>
+          </tr>
+        </thead>
+        <tbody id="tbodyCleaned"></tbody>
+      </table>
+    </div>
+
+    <!-- RAW table -->
+    <h2 class="h5 mt-4">Inventario RAW (editable)</h2>
+    <div class="table-responsive">
+      <table class="table table-hover align-middle">
+        <thead class="table-light">
+          <tr>
+            <th style="width: 80px;">ID</th>
+            <th>Nombre</th>
+            <th style="width: 140px;">Cantidad</th>
+            <th style="width: 200px;">Acciones</th>
+          </tr>
+        </thead>
+        <tbody id="tbodyRaw"></tbody>
+      </table>
+    </div>
+  </main>
+
+  <!-- Modal Editar -->
+  <div class="modal fade" id="editModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title">Editar ítem RAW</h5>
+          <button class="btn-close" data-bs-dismiss="modal" aria-label="Cerrar"></button>
+        </div>
+        <div class="modal-body">
+          <div class="mb-3">
+            <label class="form-label">Nombre</label>
+            <input id="editName" type="text" class="form-control" />
+          </div>
+          <div class="mb-2">
+            <label class="form-label">Cantidad</label>
+            <input id="editQty" type="number" class="form-control" />
+          </div>
+          <small class="text-muted">Deja en blanco un campo si no deseas modificarlo.</small>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" data-bs-dismiss="modal">Cancelar</button>
+          <button class="btn btn-primary" onclick="saveEdit()">Guardar cambios</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Bootstrap bundle -->
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>
